@@ -1,0 +1,6 @@
+[toolchain]
+# Pinned so that the canonical Colab run, any local rerun, and CI all use the
+# same compiler. EntropyFS 0.7.17 requires Rust >= 1.87 (edition 2024).
+channel = "1.98.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

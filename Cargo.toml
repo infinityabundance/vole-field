@@ -1,0 +1,61 @@
+[package]
+name = "vole-field"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.87"
+description = "Minimal durable generative-state reuse proof for VOLE-Field (tiny ConvLSTM + EntropyFS)."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/infinityabundance/vole-field"
+readme = "README.md"
+keywords = ["convlstm", "entropyfs", "recurrent", "persistence", "latent-state"]
+categories = ["artificial-intelligence", "science"]
+include = [
+    "src/**/*.rs",
+    "assets/**/*.safetensors",
+    "colab/**/*.ipynb",
+    "Cargo.toml",
+    "Cargo.lock",
+    "README.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "rust-toolchain.toml",
+]
+
+# One package. No workspace. See the README for the deliberate scope bound.
+[lib]
+name = "vole_field"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vole-field"
+path = "src/main.rs"
+
+[dependencies]
+# --- native Rust tensor / training / inference ---------------------------------
+candle-core = "=0.11.0"
+candle-nn = "=0.11.0"
+
+# --- the real persistence path (embeddable engine; no FUSE, no ublk, no uring) ---
+# Base library = store + representation machinery + Engine facade. Pinned
+# exactly: the demo's persistence semantics are part of the claim.
+entropyfs = { version = "=0.7.17", default-features = false }
+
+# --- content identity (same crate/version EntropyFS uses, so one copy builds) ---
+blake3 = "=1.8.7"
+
+# --- human-readable evidence only ----------------------------------------------
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+
+# --- checkpoint container -------------------------------------------------------
+# Same version Candle re-exports, so the tree keeps one copy. Used directly for
+# the ONE thing Candle's helper cannot do: attach provenance metadata to the
+# frozen checkpoint we ship.
+safetensors = "=0.8.0"
+
+[profile.release]
+# Line tables only: enough for a usable stack trace from a Colab run, cheap enough
+# not to matter. Deliberately NOT enabling LTO or `codegen-units = 1` — this demo is
+# bound by tiny GEMMs and file I/O, so cross-crate optimisation buys it nothing while
+# a clean build is on the critical path of the five-minute Colab budget.
+debug = 1

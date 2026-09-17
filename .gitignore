@@ -1,0 +1,14 @@
+# Local research material (papers, prior-art sources, third-party archives).
+# Never part of the proof-of-concept repository.
+/research/
+
+# Rust build output.
+/target/
+
+# Run artifacts emitted by the binary (see README "Artifacts").
+# They are reproducible from `cargo build --release --locked && cargo run --release --locked`.
+/run/
+
+# Editor / OS noise.
+*.swp
+.DS_Store
