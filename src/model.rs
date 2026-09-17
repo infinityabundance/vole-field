@@ -91,6 +91,74 @@ pub const IN_CHANNELS: usize = 3;
 /// something the optimiser has to invent.
 pub const CARRY_CHANNELS: usize = 2;
 
+// ---------------------------------------------------------------------------
+// The frozen checkpoint artifact
+// ---------------------------------------------------------------------------
+
+/// Canonical checkpoint path, relative to the working directory.
+///
+/// The path is written exactly once, here.
+/// [`crate::experiment::DEFAULT_CHECKPOINT`] points at this constant, so the CLI
+/// default and the loader cannot drift apart into two literals.
+pub const CHECKPOINT_PATH: &str = "assets/tiny_convlstm.safetensors";
+
+/// The canonical checkpoint, embedded in the binary at compile time.
+///
+/// A `cargo install`ed binary is run from whatever directory the user happens to be
+/// in, where `assets/` does not exist. Embedding the frozen bytes lets the demo and
+/// `eval` work from any directory *without changing what is loaded*: these are
+/// byte-for-byte the same weights the on-disk artifact holds, so every hash reported
+/// for them is unchanged. The file on disk stays authoritative when it is present.
+static CHECKPOINT_EMBEDDED: &[u8] = include_bytes!("../assets/tiny_convlstm.safetensors");
+
+/// Whether `path` is the canonical checkpoint path.
+pub fn is_canonical_checkpoint(path: &Path) -> bool {
+    path == Path::new(CHECKPOINT_PATH)
+}
+
+/// The embedded canonical checkpoint's bytes.
+///
+/// Exposed so a caller — or a test — can obtain the frozen artifact without
+/// depending on the working directory.
+pub fn embedded_checkpoint() -> &'static [u8] {
+    CHECKPOINT_EMBEDDED
+}
+
+/// Read a checkpoint's bytes, falling back to the embedded canonical checkpoint.
+///
+/// The fallback fires **only** when both of these hold:
+///
+/// 1. the caller asked for the canonical path, and
+/// 2. that file is absent.
+///
+/// A checkpoint named explicitly is read from disk or is an error. It is never
+/// silently swapped for the canonical weights, because that would make the hashes
+/// this program prints describe a model the user did not ask for — and those hashes
+/// are the evidence that the producer and the consumer agree on what they loaded.
+pub fn read_checkpoint(path: &Path) -> std::result::Result<Vec<u8>, String> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(bytes),
+        Err(e) => match fallback_for(path, &e) {
+            Some(embedded) => Ok(embedded.to_vec()),
+            None => Err(format!("read {path:?}: {e}")),
+        },
+    }
+}
+
+/// The fallback rule itself, as a pure function.
+///
+/// Split out from [`read_checkpoint`] so the rule can be tested directly: exercising
+/// it through the reader would require deleting the real artifact from the working
+/// directory, and a test that mutates the checkout to prove a point is a worse test
+/// than one that does not.
+///
+/// Returns the embedded bytes only when the read failed with "not found" **and** the
+/// caller asked for the canonical path. `None` means "propagate the error".
+fn fallback_for(path: &Path, err: &std::io::Error) -> Option<&'static [u8]> {
+    let not_found = err.kind() == std::io::ErrorKind::NotFound;
+    (not_found && is_canonical_checkpoint(path)).then_some(CHECKPOINT_EMBEDDED)
+}
+
 /// Parameter name: folded gate convolution weight, `[4H, in+H, k, k]`.
 pub const NAME_GATES_WEIGHT: &str = "convlstm.gates.weight";
 /// Parameter name: folded gate convolution bias, `[4H]`.
@@ -546,22 +614,42 @@ impl ConvLstm {
     /// anything missing, extra or mis-shaped is an error rather than a silently
     /// initialised variable. A model that quietly invents weights would make
     /// every downstream hash comparison meaningless.
+    ///
+    /// When the *canonical* path is absent this falls back to the embedded copy; see
+    /// [`read_checkpoint`] for exactly when that happens and why.
     pub fn load_safetensors(path: &Path, cfg: ModelConfig) -> Result<ConvLstm> {
+        let bytes = read_checkpoint(path).map_err(candle_core::Error::Msg)?;
+        ConvLstm::load_safetensors_bytes(&bytes, path, cfg)
+    }
+
+    /// Load a frozen checkpoint from safetensors bytes already in memory.
+    ///
+    /// The validation is identical to [`ConvLstm::load_safetensors`]; `origin` names
+    /// the checkpoint in error messages. Taking the bytes rather than a path is what
+    /// lets a caller hash *exactly* the bytes it loaded — reading the file twice would
+    /// leave a window in which the hashed bytes and the loaded weights could differ.
+    pub fn load_safetensors_bytes(
+        bytes: &[u8],
+        origin: &Path,
+        cfg: ModelConfig,
+    ) -> Result<ConvLstm> {
         let dev = Device::Cpu;
-        let map = candle_core::safetensors::load(path, &dev)?;
+        let map = candle_core::safetensors::load_buffer(bytes, &dev)?;
         for (name, shape) in ConvLstm::parameter_shapes(&cfg) {
             let t = map.get(name).ok_or_else(|| {
-                candle_core::Error::Msg(format!("checkpoint {path:?} is missing parameter {name}"))
+                candle_core::Error::Msg(format!(
+                    "checkpoint {origin:?} is missing parameter {name}"
+                ))
             })?;
             if t.dims() != shape.as_slice() {
                 candle_core::bail!(
-                    "checkpoint {path:?}: parameter {name} has shape {:?}, expected {shape:?}",
+                    "checkpoint {origin:?}: parameter {name} has shape {:?}, expected {shape:?}",
                     t.dims()
                 );
             }
             if t.dtype() != DType::F32 {
                 candle_core::bail!(
-                    "checkpoint {path:?}: parameter {name} has dtype {:?}, expected f32",
+                    "checkpoint {origin:?}: parameter {name} has dtype {:?}, expected f32",
                     t.dtype()
                 );
             }
@@ -571,7 +659,7 @@ impl ConvLstm {
             .filter(|k| !PARAM_NAMES.contains(&k.as_str()))
             .collect();
         if !extra.is_empty() {
-            candle_core::bail!("checkpoint {path:?} has unexpected parameters {extra:?}");
+            candle_core::bail!("checkpoint {origin:?} has unexpected parameters {extra:?}");
         }
         let vb = VarBuilder::from_tensors(map, DType::F32, &dev);
         ConvLstm::new(cfg, vb)
@@ -677,7 +765,7 @@ pub fn le_bytes_to_f32s(b: &[u8]) -> Result<Vec<f32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::hash_hex;
+    use crate::state::{hash_hex, weights_hash};
 
     /// A model with small random weights, which is what a fresh training run
     /// starts from. A zero-initialised model is degenerate on purpose (all gates
@@ -852,5 +940,70 @@ mod tests {
         assert!(b[..h].iter().all(|v| *v == 0.0));
         assert!(b[h..2 * h].iter().all(|v| *v == 1.0));
         assert!(b[2 * h..].iter().all(|v| *v == 0.0));
+    }
+
+    // --- the embedded checkpoint, and the rule for falling back to it ---------
+
+    #[test]
+    fn the_embedded_checkpoint_is_byte_identical_to_the_shipped_file() {
+        // The fallback is only honest if it serves exactly the frozen artifact. If the
+        // checkpoint is ever retrained or replaced without rebuilding, this fails loudly
+        // instead of letting the embedded copy and the file it is hashed as diverge.
+        let on_disk = std::fs::read(CHECKPOINT_PATH).expect("shipped checkpoint on disk");
+        assert_eq!(
+            on_disk.as_slice(),
+            embedded_checkpoint(),
+            "the embedded checkpoint has drifted from {CHECKPOINT_PATH}"
+        );
+    }
+
+    #[test]
+    fn the_fallback_fires_only_for_an_absent_canonical_checkpoint() {
+        let not_found = std::io::Error::from(std::io::ErrorKind::NotFound);
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+
+        assert!(is_canonical_checkpoint(Path::new(CHECKPOINT_PATH)));
+        assert!(!is_canonical_checkpoint(Path::new(
+            "elsewhere/other.safetensors"
+        )));
+
+        // The one case that may substitute.
+        assert_eq!(
+            fallback_for(Path::new(CHECKPOINT_PATH), &not_found),
+            Some(embedded_checkpoint())
+        );
+        // A checkpoint named explicitly is never substituted, even when missing.
+        assert!(fallback_for(Path::new("elsewhere/other.safetensors"), &not_found).is_none());
+        // A canonical path that failed for any other reason is a real error.
+        assert!(fallback_for(Path::new(CHECKPOINT_PATH), &denied).is_none());
+    }
+
+    #[test]
+    fn a_checkpoint_that_was_named_explicitly_is_never_substituted() {
+        // The canonical filename, but in a directory that does not exist. This must be an
+        // error: quietly serving the embedded weights would make every hash the program
+        // reports describe a model the caller did not ask for.
+        let missing = Path::new("no-such-directory").join(CHECKPOINT_PATH);
+        let err = read_checkpoint(&missing).unwrap_err();
+        assert!(err.starts_with("read "), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn loading_the_embedded_bytes_yields_the_same_weights_as_the_shipped_file() {
+        // The load-bearing property of the fallback: an installed binary, which has no
+        // `assets/` beside it, loads exactly the model the repository ships. If these two
+        // hashes ever differ, the fallback is not a fallback but a different experiment.
+        let cfg = ModelConfig::default();
+        let from_file = ConvLstm::load_safetensors(Path::new(CHECKPOINT_PATH), cfg).unwrap();
+        let from_embedded = ConvLstm::load_safetensors_bytes(
+            embedded_checkpoint(),
+            Path::new(CHECKPOINT_PATH),
+            cfg,
+        )
+        .unwrap();
+        assert_eq!(
+            weights_hash(&from_file).unwrap(),
+            weights_hash(&from_embedded).unwrap()
+        );
     }
 }

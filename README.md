@@ -1,5 +1,7 @@
 # vole-field
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/infinityabundance/vole-field/blob/main/colab/vole_field_demo.ipynb)
+
 A minimal, rigorous, native-Rust proof of **one** proposition:
 
 > Useful generative state earned by an open local model can survive process
@@ -84,11 +86,11 @@ A reader who wants only the experiment itself can read `scene.rs`, `model.rs` an
 Free tier, CPU, **hardware accelerator: None**. No GPU, no API key, no account, no paid
 model, no external inference service.
 
-1. Push this repository to a remote (the notebook clones it and prints the exact
-   commit under test). If you only have a local checkout, point `REPO_URL` in cell 1 at
-   a `file://` URL or copy the tree into `/content/vole-field` yourself.
-2. Open `colab/vole_field_demo.ipynb` in Colab.
-3. **Runtime → Run all.**
+1. Click the **Open in Colab** badge at the top of this README, or open
+   `colab/vole_field_demo.ipynb` in Colab. Cell 1 clones
+   `github.com/infinityabundance/vole-field` and prints the exact commit under test; if you
+   are running a fork, point `REPO_URL` in cell 1 there instead.
+2. **Runtime → Run all.**
 
 Four steps: install the pinned toolchain and print the exact commit →
 `cargo build --release --locked` → `cargo run --release --locked` → display the montage
@@ -105,6 +107,15 @@ cargo run  --release --locked      # runs the experiment into ./run/
 The toolchain is pinned by `rust-toolchain.toml`; the dependency graph is pinned by
 `Cargo.lock` and by exact-version constraints in `Cargo.toml`. `--locked` refuses to
 move anything.
+
+The frozen checkpoint is shipped in `assets/` **and** embedded in the binary, so the
+installed binary works from any working directory rather than only from a checkout (see
+[The frozen checkpoint](#the-frozen-checkpoint)):
+
+```sh
+cargo install vole-field
+vole-field run                     # works from anywhere; writes ./run/
+```
 
 Offline tooling, none of which the demo needs:
 
@@ -505,6 +516,22 @@ parameters       3,937
 raw state        73,728 bytes (H 32,768 + C 32,768 + carry 8,192)
 ```
 
+The same 17,036 bytes are also **embedded in the binary** (`include_bytes!`), and the
+loader falls back to that copy *only* when both of these hold: the canonical path was the
+one asked for, **and** it is absent. Two consequences are worth stating plainly.
+
+- A `cargo install`ed `vole-field` works from any working directory. Without this, the
+  binary would abort with `read "assets/tiny_convlstm.safetensors": No such file or
+  directory` the moment it was run outside a checkout.
+- An explicitly named checkpoint is **never** silently substituted. A missing
+  `--checkpoint foo.safetensors` is an error, because quietly serving the canonical weights
+  instead would make every hash this program reports describe a model the user did not ask
+  for — and those hashes are the evidence that producer and consumer loaded the same thing.
+
+When the file is present on disk it wins, so replacing `assets/` still changes what runs.
+Two tests pin the behaviour: one asserts the embedded copy is byte-identical to the shipped
+file, and one asserts the file and the embedded copy load to the same weights hash.
+
 Networks are adapted from Shi et al., *Convolutional LSTM Network: A Machine Learning
 Approach for Precipitation Nowcasting*, [arXiv:1506.04214](https://arxiv.org/abs/1506.04214).
 Nothing about the architecture is claimed as novel.
@@ -669,8 +696,11 @@ Cargo.toml              one package, exact-version dependencies
 Cargo.lock              pinned dependency graph (use --locked)
 rust-toolchain.toml     pinned compiler
 README.md
+LICENSE-MIT
+LICENSE-APACHE
 assets/
-    tiny_convlstm.safetensors      17,036 bytes, frozen, with provenance metadata
+    tiny_convlstm.safetensors      17,036 bytes, frozen, with provenance metadata; also
+                                   embedded in the binary (see The frozen checkpoint)
 src/
     main.rs             CLI: run | producer | request | train | eval | version
     lib.rs              crate documentation and module map
@@ -698,8 +728,10 @@ including dedup idempotence and materialising the exact bytes; the declared para
 and MAC counts matching the built model; the persistence initialisation emitting the carry
 bit for bit; the carry window shifting correctly; the scene's bit-level reproducibility;
 the memoryless throttle; the bodies never leaving the field; distinct requests producing
-distinct futures; and the rotation constants matching the platform's `cos`/`sin` to the last
-bit.
+distinct futures; the embedded checkpoint being byte-identical to the shipped file and
+loading to the same weights hash; the fallback firing only for an absent canonical
+checkpoint and never substituting for an explicitly named one; and the rotation constants
+matching the platform's `cos`/`sin` to the last bit.
 
 ---
 

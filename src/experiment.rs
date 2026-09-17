@@ -46,7 +46,9 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use candle_core::{Device, Result, Tensor};
 use serde::{Deserialize, Serialize};
 
-use crate::model::{ConvLstm, ModelConfig, State, StepWork, WorkMeter, WorkTotals};
+use crate::model::{
+    read_checkpoint, ConvLstm, ModelConfig, State, StepWork, WorkMeter, WorkTotals,
+};
 use crate::scene::{self, Control, Request, SceneId, SceneSpec, Schedule, H, HW, W};
 use crate::state::{
     config_hash, hash_hex, hex32, state_hash, weights_hash, Check, Expectation, StateRecord,
@@ -60,7 +62,11 @@ use crate::state::{
 /// Default run directory, relative to the working directory.
 pub const DEFAULT_RUN_DIR: &str = "run";
 /// Default frozen checkpoint.
-pub const DEFAULT_CHECKPOINT: &str = "assets/tiny_convlstm.safetensors";
+///
+/// The canonical path, whose bytes are also embedded in the binary, so a
+/// `cargo install`ed binary finds them from any working directory; see
+/// [`crate::model::read_checkpoint`].
+pub const DEFAULT_CHECKPOINT: &str = crate::model::CHECKPOINT_PATH;
 /// Frames the producer consumes to earn the state.
 pub const DEFAULT_CONTEXT: usize = 256;
 /// Frames each branch request generates.
@@ -603,6 +609,11 @@ pub struct Context {
 
 impl Generator {
     /// Load the frozen checkpoint and derive its identity hashes.
+    ///
+    /// The same bytes are hashed and loaded, so `checkpoint_file_hash` describes exactly
+    /// the weights in use rather than a second, later read of the file. An absent
+    /// *canonical* checkpoint falls back to the embedded copy; see
+    /// [`crate::model::read_checkpoint`].
     pub fn load(
         checkpoint: &Path,
         scene: SceneId,
@@ -610,9 +621,8 @@ impl Generator {
         future_len: usize,
         cfg: ModelConfig,
     ) -> Result<Generator> {
-        let bytes = std::fs::read(checkpoint)
-            .map_err(|e| candle_core::Error::Msg(format!("read {checkpoint:?}: {e}")))?;
-        let model = ConvLstm::load_safetensors(checkpoint, cfg)?;
+        let bytes = read_checkpoint(checkpoint).map_err(candle_core::Error::Msg)?;
+        let model = ConvLstm::load_safetensors_bytes(&bytes, checkpoint, cfg)?;
         Ok(Generator {
             weights_hash: weights_hash(&model)?,
             config_hash: config_hash(&cfg),
