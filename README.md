@@ -38,8 +38,10 @@ control. See [What this does not prove](#what-this-does-not-prove).
 The whole experiment takes about **8 seconds** of wall time on 16 CPU cores after
 compilation, and it launches **159 child processes**, each of which is verified to be a
 distinct OS process. A clean release build from scratch takes about **28 seconds** on the
-same 16 cores; a free Colab runtime is slower than that, which is why the notebook's budget
-is stated in terms of the build rather than assumed.
+same 16 cores. On a free Colab CPU that build is not seconds but **roughly 10–20 minutes**,
+and it dominates everything else the notebook does — which is why the notebook states that
+estimate on the page before it starts, rather than leaving the reader to wonder whether it
+has hung.
 
 ### Size, and where it went
 
